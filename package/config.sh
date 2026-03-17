@@ -20,7 +20,7 @@ fi
 # 1. 参数判断：是否为默认初始化模式
 # ====================================================
 if [ "$1" == "--default" ]; then
-    echo "🔄 [静默模式] 正在将配置项重置为默认名称占位符，并修复硬编码路径..."
+    echo "🔄 [静默模式] 正在执行出厂脱敏清理并注入默认占位符..."
     export IS_DEFAULT="true"
     export INPUT_FEISHU_APP_ID="FEISHU_APP_ID"
     export INPUT_FEISHU_APP_SECRET="FEISHU_APP_SECRET"
@@ -91,10 +91,11 @@ echo "----------------------------------------------------"
 if [ "$IS_DEFAULT" != "true" ]; then echo "⚙️ 正在检查、更新配置并自适应修复绝对路径..."; fi
 
 # ====================================================
-# 3. 将新的配置写入 JSON (注入了路径自愈与环境清理逻辑)
+# 3. 将新的配置写入 JSON (注入了脱敏、修复与无损注册逻辑)
 # ====================================================
 "$NODE_BIN" -e "
 const fs = require('fs');
+const crypto = require('crypto'); // 【增加1】: 引入内置加密模块
 const file = process.env.CONFIG_FILE;
 const openclawDir = process.env.OPENCLAW_DIR;
 const aiChoice = process.env.AI_CHOICE;
@@ -104,19 +105,57 @@ try {
     let config = JSON.parse(fs.readFileSync(file, 'utf8'));
 
     // ================== 核心清理与修复 ==================
-    // 1. 仅在打包出厂(--default)时，彻底删除硬编码的 env 字段
     if (isDefault) {
         delete config.env;
-    }
 
-    // 2. 修复 workspace 路径
-    if (!config.agents) config.agents = {};
-    if (!config.agents.defaults) config.agents.defaults = {};
-    config.agents.defaults.workspace = openclawDir + '/workspace';
+        if (config.gateway && config.gateway.auth) {
+            config.gateway.auth.token = 'GATEWAY_AUTH_TOKEN_PLACEHOLDER';
+        }
 
-    // 3. 修复 feishu 插件的安装路径
-    if (config.plugins && config.plugins.installs && config.plugins.installs.feishu) {
-        config.plugins.installs.feishu.installPath = openclawDir + '/extensions/feishu';
+        if (config.skills && config.skills.entries) {
+            for (let skillName in config.skills.entries) {
+                if (config.skills.entries[skillName].env) {
+                    delete config.skills.entries[skillName].env;
+                }
+            }
+        }
+
+        if (config.tools && config.tools.web && config.tools.web.search && config.tools.web.search.apiKey) {
+            config.tools.web.search.apiKey = 'WEB_SEARCH_API_KEY';
+        }
+
+        if (!config.agents) config.agents = {};
+        if (!config.agents.defaults) config.agents.defaults = {};
+        config.agents.defaults.workspace = '<OPENCLAW_DIR>/workspace';
+
+        // 仅在出厂脱敏时，清空历史测试遗留的冗余模型和降级链
+        if (!config.agents.defaults.model) config.agents.defaults.model = {};
+        config.agents.defaults.model.fallbacks = [];
+        config.agents.defaults.models = {};
+
+        if (config.plugins && config.plugins.installs) {
+            for (let pluginName in config.plugins.installs) {
+                config.plugins.installs[pluginName].installPath = '<OPENCLAW_DIR>/extensions/' + pluginName;
+            }
+        }
+    } else {
+        // 【增加2】: 如果发现是出厂占位符，自动生成随机安全 Token
+        if (config.gateway && config.gateway.auth && config.gateway.auth.token === 'GATEWAY_AUTH_TOKEN_PLACEHOLDER') {
+            const newToken = crypto.randomBytes(24).toString('hex');
+            config.gateway.auth.token = newToken;
+            console.log('🔑 [安全] 已为您自动生成全新的 Gateway 管理 Token: ' + newToken);
+            console.log('   (请妥善保管，如需查看可打开 openclaw.json 获取)');
+        }
+
+        if (!config.agents) config.agents = {};
+        if (!config.agents.defaults) config.agents.defaults = {};
+        config.agents.defaults.workspace = openclawDir + '/workspace';
+
+        if (config.plugins && config.plugins.installs) {
+            for (let pluginName in config.plugins.installs) {
+                config.plugins.installs[pluginName].installPath = openclawDir + '/extensions/' + pluginName;
+            }
+        }
     }
     // ======================================================
 
@@ -132,7 +171,10 @@ try {
     if (aiChoice === '1' || aiChoice === '2') {
         if (!config.models) config.models = { providers: {} };
         if (!config.models.providers) config.models.providers = {};
+        if (!config.agents) config.agents = {};
+        if (!config.agents.defaults) config.agents.defaults = {};
         if (!config.agents.defaults.model) config.agents.defaults.model = {};
+        if (!config.agents.defaults.models) config.agents.defaults.models = {};
 
         if (aiChoice === '1') {
             delete config.models.providers.moonshot;
@@ -155,7 +197,13 @@ try {
                 vllm.models[0].id = process.env.INPUT_VLLM_MODEL;
                 vllm.models[0].name = process.env.INPUT_VLLM_MODEL;
             }
-            config.agents.defaults.model.primary = 'vllm/' + (vllm.models[0].id || '');
+
+            // 动态注册 vLLM 主模型 (仅更新/插入，不破坏其他模型)
+            const primaryId = 'vllm/' + (vllm.models[0].id || '');
+            config.agents.defaults.model.primary = primaryId;
+            if (!config.agents.defaults.models[primaryId]) {
+                config.agents.defaults.models[primaryId] = {};
+            }
 
         } else if (aiChoice === '2') {
             delete config.models.providers.vllm;
@@ -171,7 +219,15 @@ try {
             }
             let moonshot = config.models.providers.moonshot;
             if (process.env.INPUT_KIMI_API_KEY) moonshot.apiKey = process.env.INPUT_KIMI_API_KEY;
-            config.agents.defaults.model.primary = 'moonshot/kimi-k2.5';
+
+            // 动态注册 Kimi 主模型并赋予别名 (仅更新/插入，不破坏其他模型)
+            const primaryId = 'moonshot/kimi-k2.5';
+            config.agents.defaults.model.primary = primaryId;
+            if (!config.agents.defaults.models[primaryId]) {
+                config.agents.defaults.models[primaryId] = { alias: 'Kimi' };
+            } else if (!config.agents.defaults.models[primaryId].alias) {
+                config.agents.defaults.models[primaryId].alias = 'Kimi';
+            }
         }
     }
 
@@ -187,11 +243,29 @@ try {
 if [ "$IS_DEFAULT" != "true" ]; then
     echo "===================================================="
     echo "🎉 配置向导完成！"
-    echo "⚠️ 重要提示：如果你已经启动了 OpenClaw，新配置需要重启服务才能生效。"
+
+    # 【增加3】: 注册全局命令
+    USER_BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$USER_BIN_DIR"
+    ln -sf "$DIR/openclaw.sh" "$USER_BIN_DIR/openclaw"
+
+    echo "🔗 已为您注册全局命令: openclaw"
+    echo "   (软链接指向: $USER_BIN_DIR/openclaw)"
+
+    if [[ ":$PATH:" != *":$USER_BIN_DIR:"* ]]; then
+        echo "⚠️  注意: $USER_BIN_DIR 似乎不在您的 PATH 环境变量中。"
+        echo "   为确保 'openclaw' 命令立即生效，您可以运行一次："
+        echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
+    else
+        echo "💡 您现在可以在终端任意位置直接输入 'openclaw' 来运行它了！"
+    fi
+    echo "----------------------------------------------------"
+
+    echo "⚠️ 重要提示：如果您已经启动了 OpenClaw，新配置需要重启服务才能生效。"
     echo "   请依次执行以下命令完成重启："
     echo "   ./stop.sh"
     echo "   ./start.sh"
     echo "===================================================="
 else
-    echo "✅ 默认占位符模板及环境自适应清理已成功执行！"
+    echo "✅ 默认脱敏模板及占位符已成功写入！"
 fi
